@@ -1,33 +1,6 @@
-"""
-Simple Desktop Browser (pywebview / native OS engine)
---------------------------------------------------------
-- Uses pywebview -> renders with your OS's native, always-current webview
-  (WebView2/Edge on Windows, WKWebView on macOS, WebKitGTK on Linux).
-- Tab system: add / switch / close tabs via an injected tab strip.
-  NOTE: only one real page is "live" at a time (the active tab). Since
-  pywebview gives you a single native engine per window, background tabs
-  just remember their URL and reload it when you switch back to them.
-  This keeps memory usage low, at the cost of not preserving JS state in
-  tabs you're not currently looking at.
-- The toolbar (tab strip + nav bar + address bar) is injected as real page
-  content and pushes the actual website DOWN (via body margin-top), so it
-  never overlaps the page.
-- Runs in the background: closing the window hides it instead of quitting.
-  A system tray icon lets you reopen it or actually quit.
-
-Run:
-    pip install pywebview pystray pillow
-    python browser.py
-
-Build a Windows .exe (must be run ON WINDOWS):
-    pip install pyinstaller
-    pyinstaller --noconfirm --onefile --windowed --name Browser browser.py
-"""
-
 import json
 import os
 import threading
-import urllib.parse
 
 import webview
 import pystray
@@ -241,12 +214,25 @@ class BrowserController:
     def close_tab(self, index):
         if len(self.tabs) <= 1:
             return  # always keep at least one tab open
+        if not (0 <= index < len(self.tabs)):
+            return
+
+        was_current = (index == self.current)
         del self.tabs[index]
+
         if self.current >= len(self.tabs):
             self.current = len(self.tabs) - 1
         elif index < self.current:
             self.current -= 1
-        self.window.load_url(self.tabs[self.current]["url"])
+
+        if was_current:
+            # The tab that was on screen got closed -> load whatever tab
+            # is now current. on_loaded() will refresh the toolbar for us.
+            self.window.load_url(self.tabs[self.current]["url"])
+        else:
+            # A background tab was closed; the visible page didn't change,
+            # so just repaint the toolbar to reflect the updated tab list.
+            self.inject_toolbar()
 
 
 # ---------- system tray (background mode) ----------
