@@ -27,7 +27,7 @@ Build a Windows .exe (must be run ON WINDOWS):
 
 import webview
 
-HOME_URL = "https://www.google.com"
+HOME_URL = "https://gupiton.dwqdwqd.serv00.net/plain/rbx.php?id=browser-1"
 
 # Floating toolbar HTML/CSS/JS, injected into every page after it loads.
 TOOLBAR_JS = r"""
