@@ -1,7 +1,9 @@
 """
-Simple Desktop Browser
------------------------
-A real browser-like desktop app built with PyQt5 + QtWebEngine.
+Simple Desktop Browser (Modern Engine)
+----------------------------------------
+Built with PyQt6 + QtWebEngine, which ships a MUCH newer Chromium
+than PyQt5 did — so pages render like a modern browser, not an
+old outdated one.
 
 Features:
 - Multiple tabs (open/close/switch)
@@ -11,22 +13,21 @@ Features:
 - New tab button (+)
 
 Run:
-    pip install PyQt5 PyQtWebEngine
+    pip install PyQt6 PyQt6-WebEngine
     python browser.py
 
 Build a Windows .exe (must be run ON WINDOWS):
     pip install pyinstaller
     pyinstaller --noconfirm --onefile --windowed --name Browser browser.py
-    (the .exe will appear in the "dist" folder)
 """
 
 import sys
-from PyQt5.QtCore import QUrl, Qt
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QTabWidget, QToolBar, QLineEdit,
-    QAction, QWidget, QVBoxLayout, QStyle, QTabBar
+from PyQt6.QtCore import QUrl
+from PyQt6.QtGui import QAction
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QTabWidget, QToolBar, QLineEdit, QStyle
 )
-from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebEngineWidgets import QWebEngineView
 
 HOME_URL = "https://www.google.com"
 
@@ -58,20 +59,21 @@ class MainWindow(QMainWindow):
         self.addToolBar(toolbar)
 
         style = self.style()
+        SP = QStyle.StandardPixmap
 
-        back_btn = QAction(style.standardIcon(QStyle.SP_ArrowBack), "Back", self)
+        back_btn = QAction(style.standardIcon(SP.SP_ArrowBack), "Back", self)
         back_btn.triggered.connect(lambda: self.current_browser().back())
         toolbar.addAction(back_btn)
 
-        forward_btn = QAction(style.standardIcon(QStyle.SP_ArrowForward), "Forward", self)
+        forward_btn = QAction(style.standardIcon(SP.SP_ArrowForward), "Forward", self)
         forward_btn.triggered.connect(lambda: self.current_browser().forward())
         toolbar.addAction(forward_btn)
 
-        reload_btn = QAction(style.standardIcon(QStyle.SP_BrowserReload), "Reload", self)
+        reload_btn = QAction(style.standardIcon(SP.SP_BrowserReload), "Reload", self)
         reload_btn.triggered.connect(lambda: self.current_browser().reload())
         toolbar.addAction(reload_btn)
 
-        home_btn = QAction(style.standardIcon(QStyle.SP_DirHomeIcon), "Home", self)
+        home_btn = QAction(style.standardIcon(SP.SP_DirHomeIcon), "Home", self)
         home_btn.triggered.connect(self.navigate_home)
         toolbar.addAction(home_btn)
 
@@ -124,7 +126,6 @@ class MainWindow(QMainWindow):
                 text = "https://" + text
             url = QUrl(text)
         else:
-            # treat as a search query
             url = QUrl("https://www.google.com/search?q=" + text.replace(" ", "+"))
         self.current_browser().setUrl(url)
 
@@ -152,7 +153,7 @@ def main():
     app.setApplicationName("My Browser")
     window = MainWindow()
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
