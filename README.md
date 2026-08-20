@@ -2,6 +2,8 @@ A customized new tab default page for any browser that supports the format of a 
 
 ![](https://media.tenor.com/wOAcLB8ZZhcAAAAi/alya-alya-sometimes-hides-her-feelings-in-russian.gif)
 
+API [https://browser-api.pages.dev/](https://browser-api.pages.dev/)
+
 - Assistant by Claude this time :D
 
 - This really useful for me
