@@ -1,171 +1,168 @@
-import webview
-import threading
-import re
-import os
-import urllib.request
-import urllib.parse
+"""
+tripo3d_to_imgbb.py
+====================
+1.  Shows a URL-input page in a pywebview window.
+2.  Navigates to the Tripo3D model page and intercepts the signed .glb URL.
+3.  Encodes the *source code of this very file* into a PNG image
+    (each byte becomes one RGB pixel, packed left-to-right, top-to-bottom).
+4.  Uploads the PNG to imgbb using the provided credentials.
+5.  Shows the resulting imgbb URL / embed code in the window.
 
-# Default URL to load first
-DEFAULT_URL = (
+Dependencies:
+    pip install pywebview Pillow requests
+"""
+
+import io
+import math
+import os
+import re
+import threading
+import base64
+
+import requests
+from PIL import Image
+
+try:
+    import webview
+except ImportError:
+    webview = None  # allow the module to be imported without pywebview for testing
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+IMGBB_URL    = "https://api.imgbb.com/1/upload"
+# The auth token you provided (used as the imgbb API key / form token)
+IMGBB_TOKEN  = "69a7f9208a32c6904a623523758674f6237db0ae"
+IMGBB_PHPSESSID = "tpnsh80jem2qiet9a7nmahccn5"
+
+DEFAULT_TRIPO_URL = (
     "https://studio.tripo3d.ai/3d-model/"
-    "anime-girl-with-dark-hair-in-a-black-and-pink-school-uniform-"
-    "wielding-bc97148a-4c5b-4196-a3ed-57cea8530be6"
+    "anime-girl-character-with-flowing-peach-hair-pink-skirt-white-top-a-"
+    "26b155ec-9124-46c1-acb8-139b24d78c28"
 )
 
-# 3D model file extensions to detect (used as a fallback pattern)
-MODEL_EXTENSIONS = [
-    ".glb", ".gltf",
-    ".fbx",
-    ".obj",
-    ".stl",
-    ".ply",
-    ".dae",       # Collada
-    ".3ds",
-    ".blend",
-    ".usdz", ".usd",
-    ".abc",       # Alembic
-    ".x3d",
-    ".wrl", ".vrml",
-    ".off",
-    ".iges", ".igs",
-    ".step", ".stp",
-]
+DOWNLOAD_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "Tripo3D")
 
-# --- Primary pattern -------------------------------------------------------
-# Tripo3D's signed download links always look like:
-#   ...meshopt.glb?Key-Pair-Id=...&Policy=...&Signature=...
-# This is a static, predictable structure, so we match on it directly
-# instead of relying on a generic extension scan.
+
+# ---------------------------------------------------------------------------
+# Regex patterns (same logic as original script)
+# ---------------------------------------------------------------------------
+
 TRIPO_GLB_PATTERN = re.compile(
     r"https?://[^\s\"'<>]+\.glb\?Key-Pair-Id=[^\s\"'<>]+",
     re.IGNORECASE,
 )
 
-# --- Fallback pattern --------------------------------------------------
-# Broader match against any known 3D model extension, used only if the
-# primary Tripo3D-specific pattern doesn't find anything (e.g. Tripo3D
-# changes their CDN param order, or the page serves a different format).
+MODEL_EXTENSIONS = [
+    ".glb", ".gltf", ".fbx", ".obj", ".stl", ".ply", ".dae",
+    ".3ds", ".blend", ".usdz", ".usd", ".abc", ".x3d",
+    ".wrl", ".vrml", ".off", ".iges", ".igs", ".step", ".stp",
+]
 _ext_pattern = "|".join(re.escape(e) for e in MODEL_EXTENSIONS)
 MODEL_URL_PATTERN = re.compile(
     rf"https?://[^\s\"'<>]+(?:{_ext_pattern})(?:[?#][^\s\"'<>]*)?",
     re.IGNORECASE,
 )
 
-window = None  # will be set in main()
 
-DOWNLOAD_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "Tripo3D")
+# ---------------------------------------------------------------------------
+# Image encoding  (bytes → pixels)
+# ---------------------------------------------------------------------------
 
+def bytes_to_png(data: bytes) -> bytes:
+    """
+    Encode arbitrary bytes into a PNG.
 
-def _filename_from_url(url: str) -> str:
-    """Extract a clean filename from a signed URL (strip query string)."""
-    path = urllib.parse.urlparse(url).path
-    name = os.path.basename(path) or "model.glb"
-    return urllib.parse.unquote(name)
+    Layout:
+        • First 4 bytes  → big-endian uint32: total number of data bytes
+        • Remaining bytes → raw payload
 
+    Each byte becomes one pixel channel value.  Pixels are RGB triples,
+    so we pack 3 bytes per pixel.  The image is square-ish (width ≈ √n).
+    Unused trailing channels in the last pixel are zero-padded.
 
-def _download_worker(url: str, dest_path: str):
-    """Runs in a background thread: streams the file to disk with progress."""
-    try:
-        print(f"[download] Starting: {url}")
-        print(f"[download] Saving to: {dest_path}")
+    Returns the PNG file content as bytes.
+    """
+    header   = len(data).to_bytes(4, "big")
+    payload  = header + data
+    n_bytes  = len(payload)
 
-        def report_progress(block_num, block_size, total_size):
-            if total_size > 0:
-                downloaded = block_num * block_size
-                pct = min(100, downloaded * 100 // total_size)
-                print(f"\r[download] {pct}% ({downloaded}/{total_size} bytes)", end="")
+    # Pad to a multiple of 3 so every pixel is fully occupied
+    pad      = (3 - n_bytes % 3) % 3
+    padded   = payload + b"\x00" * pad
+    n_pixels = len(padded) // 3
 
-        urllib.request.urlretrieve(url, dest_path, reporthook=report_progress)
-        print(f"\n[download] Done → {dest_path}")
+    # Choose dimensions: try to make a near-square image
+    width  = math.ceil(math.sqrt(n_pixels))
+    height = math.ceil(n_pixels / width)
 
-        if window is not None:
-            # Notify the page so the UI can show a success message
-            safe_path = dest_path.replace("\\", "\\\\").replace("'", "\\'")
-            window.evaluate_js(
-                f"console.log('[Tripo3D Viewer] Download complete: {safe_path}');"
-            )
-    except Exception as e:
-        print(f"\n[download] FAILED: {e}")
-        if window is not None:
-            safe_err = str(e).replace("\\", "\\\\").replace("'", "\\'")
-            window.evaluate_js(
-                f"console.error('[Tripo3D Viewer] Download failed: {safe_err}');"
-            )
+    # Fill pixel array (pad remaining pixels with black)
+    total_pixels = width * height
+    pixel_data   = padded + b"\x00" * ((total_pixels - n_pixels) * 3)
 
-
-class Api:
-    """Python API exposed to JavaScript running inside the webview."""
-
-    def check_for_model_url(self, page_html: str) -> str | None:
-        """
-        Called from JS with the full page HTML / visible text.
-        Tries the static Tripo3D .glb?Key-Pair-Id= pattern first, then
-        falls back to the generic extension pattern.
-        Returns the first matching URL, or None.
-        """
-        match = TRIPO_GLB_PATTERN.search(page_html)
-        if match:
-            return match.group(0)
-
-        match = MODEL_URL_PATTERN.search(page_html)
-        return match.group(0) if match else None
-
-    def redirect(self, url: str) -> None:
-        """Navigate the window to *url* from Python (runs on the main thread)."""
-        if window is not None:
-            window.load_url(url)
-            print(f"[redirect] → {url}")
-
-    def download_model(self, url: str) -> str:
-        """
-        Called from JS as soon as a model URL is detected.
-        Opens a native 'Save As' dialog and downloads the file in the
-        background so the UI doesn't freeze. Returns a status string.
-        """
-        if window is None:
-            return "error: window not ready"
-
-        suggested_name = _filename_from_url(url)
-
-        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-        try:
-            result = window.create_file_dialog(
-                webview.SAVE_DIALOG,
-                directory=DOWNLOAD_DIR,
-                save_filename=suggested_name,
-            )
-        except Exception as e:
-            print(f"[download] Save dialog failed: {e}")
-            result = None
-
-        # If the user cancels the dialog, fall back to saving directly
-        # into DOWNLOAD_DIR with the suggested filename.
-        if not result:
-            dest_path = os.path.join(DOWNLOAD_DIR, suggested_name)
-        else:
-            dest_path = result if isinstance(result, str) else result[0]
-
-        threading.Thread(
-            target=_download_worker, args=(url, dest_path), daemon=True
-        ).start()
-
-        return f"downloading to {dest_path}"
+    img = Image.frombytes("RGB", (width, height), pixel_data)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=False, compress_level=0)
+    return buf.getvalue()
 
 
-# JavaScript injected into every page after it loads.
-# Patches fetch/XHR and watches the Resource Timing API to catch the
-# model URL the instant it's requested by the page, then triggers a
-# real file download via the Python side (instead of navigating).
-INJECTOR_JS = """
+def png_to_bytes(png_bytes: bytes) -> bytes:
+    """Reverse of bytes_to_png — decode the hidden payload from a PNG."""
+    img        = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    raw        = img.tobytes()
+    length     = int.from_bytes(raw[:4], "big")
+    return raw[4:4 + length]
+
+
+# ---------------------------------------------------------------------------
+# imgbb upload
+# ---------------------------------------------------------------------------
+
+def upload_to_imgbb(png_bytes: bytes, filename: str = "networklisten.png") -> dict:
+    """
+    Upload *png_bytes* to imgbb via their JSON API.
+    Returns the parsed JSON response dict.
+    """
+    b64 = base64.b64encode(png_bytes).decode()
+
+    resp = requests.post(
+        IMGBB_URL,
+        data={
+            "key":    IMGBB_TOKEN,
+            "image":  b64,
+            "name":   filename,
+        },
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/152.0.0.0 Safari/537.36 Edg/152.0.0.0"
+            ),
+            "Referer": "https://imgbb.com/",
+            "Origin":  "https://imgbb.com",
+        },
+        cookies={"PHPSESSID": IMGBB_PHPSESSID},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# JavaScript injected into Tripo3D pages
+# ---------------------------------------------------------------------------
+
+INJECTOR_JS = r"""
 (function () {
-    var PRIMARY_PATTERN = /https?:\\/\\/[^\\s"'<>]+\\.glb\\?Key-Pair-Id=[^\\s"'<>]+/i;
-    var FALLBACK_EXTS = [
-        '\\.glb', '\\.gltf', '\\.fbx', '\\.obj', '\\.stl',
-        '\\.ply', '\\.dae', '\\.3ds', '\\.blend',
-        '\\.usdz', '\\.usd', '\\.abc', '\\.x3d',
-        '\\.wrl', '\\.vrml', '\\.off', '\\.iges',
-        '\\.igs', '\\.step', '\\.stp'
+    var PRIMARY_PATTERN  = /https?:\/\/[^\s"'<>]+\.glb\?Key-Pair-Id=[^\s"'<>]+/i;
+    var FALLBACK_EXTS    = [
+        '\.glb','\.gltf','\.fbx','\.obj','\.stl',
+        '\.ply','\.dae','\.3ds','\.blend',
+        '\.usdz','\.usd','\.abc','\.x3d',
+        '\.wrl','\.vrml','\.off','\.iges',
+        '\.igs','\.step','\.stp'
     ];
     var FALLBACK_PATTERN = new RegExp(
         'https?://[^\\s"\\'<>]+(?:' + FALLBACK_EXTS.join('|') + ')(?:[?#][^\\s"\\'<>]*)?',
@@ -186,10 +183,10 @@ INJECTOR_JS = """
         if (_found) return;
         _found = true;
         console.log('[Network Listener] Model URL detected:', url);
-        window.pywebview.api.download_model(url);
+        window.pywebview.api.on_model_found(url);
     }
 
-    // 1. Intercept fetch()
+    // Intercept fetch
     var _origFetch = window.fetch;
     window.fetch = function (input, init) {
         var url = typeof input === 'string' ? input : (input && input.url);
@@ -198,7 +195,7 @@ INJECTOR_JS = """
         return _origFetch.apply(this, arguments);
     };
 
-    // 2. Intercept XMLHttpRequest
+    // Intercept XHR
     var _origOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function (method, url) {
         var match = isModelUrl(url);
@@ -206,8 +203,7 @@ INJECTOR_JS = """
         return _origOpen.apply(this, arguments);
     };
 
-    // 3. Catch requests not made via fetch/XHR (e.g. <a>, <img>, <video>,
-    //    or the browser's own resource loads) using the Resource Timing API
+    // Resource Timing API
     var observer = new PerformanceObserver(function (list) {
         list.getEntries().forEach(function (entry) {
             var match = isModelUrl(entry.name);
@@ -216,40 +212,518 @@ INJECTOR_JS = """
     });
     observer.observe({ type: 'resource', buffered: true });
 
-    console.log('[Network Listener] Watching fetch, XHR, and resource loads for model URLs...');
+    console.log('[Network Listener] Watching for model URLs…');
 })();
 """
 
 
-def on_loaded(window_ref):
-    """Injected after every page load."""
-    # Only scan Tripo3D pages (skip if we already landed on a model file)
-    current_url = window_ref.get_current_url() or ""
-    if "tripo3d.ai" in current_url:
-        window_ref.evaluate_js(INJECTOR_JS)
-        print(f"[scanner] Injected detector on: {current_url}")
+# ---------------------------------------------------------------------------
+# Landing page HTML
+# ---------------------------------------------------------------------------
 
+LANDING_HTML = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tripo3D → imgbb Encoder</title>
+<style>
+  :root {{
+    --bg:      #0d0f14;
+    --surface: #161922;
+    --border:  #252a36;
+    --accent:  #7c5cfc;
+    --accent2: #c084fc;
+    --text:    #e2e4f0;
+    --muted:   #6b7280;
+    --success: #22d3a5;
+    --error:   #f87171;
+    --radius:  10px;
+    --mono:    'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    --sans:    'Inter', 'Segoe UI', system-ui, sans-serif;
+  }}
+
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+  body {{
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+  }}
+
+  .card {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2.5rem 2rem;
+    width: 100%;
+    max-width: 620px;
+    box-shadow: 0 8px 40px rgba(0,0,0,.5);
+  }}
+
+  .logo {{
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    margin-bottom: 1.8rem;
+  }}
+
+  .logo-icon {{
+    width: 36px; height: 36px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }}
+
+  .logo-text {{
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: -.02em;
+    color: var(--text);
+  }}
+
+  .logo-text span {{ color: var(--accent2); }}
+
+  h1 {{
+    font-size: 1.55rem;
+    font-weight: 700;
+    line-height: 1.25;
+    margin-bottom: .5rem;
+    letter-spacing: -.03em;
+  }}
+
+  .sub {{
+    color: var(--muted);
+    font-size: .875rem;
+    line-height: 1.6;
+    margin-bottom: 2rem;
+  }}
+
+  label {{
+    display: block;
+    font-size: .8rem;
+    font-weight: 500;
+    color: var(--muted);
+    margin-bottom: .45rem;
+    letter-spacing: .04em;
+  }}
+
+  .input-row {{
+    display: flex;
+    gap: .6rem;
+    margin-bottom: 1.2rem;
+  }}
+
+  input[type=text] {{
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: .78rem;
+    padding: .7rem .9rem;
+    outline: none;
+    transition: border-color .15s;
+  }}
+
+  input[type=text]:focus {{ border-color: var(--accent); }}
+  input[type=text]::placeholder {{ color: var(--muted); opacity: .6; }}
+
+  button {{
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border: none;
+    border-radius: var(--radius);
+    color: #fff;
+    cursor: pointer;
+    font-family: var(--sans);
+    font-size: .875rem;
+    font-weight: 600;
+    padding: .7rem 1.4rem;
+    white-space: nowrap;
+    transition: opacity .15s, transform .1s;
+  }}
+
+  button:hover  {{ opacity: .88; transform: translateY(-1px); }}
+  button:active {{ transform: translateY(0); opacity: 1; }}
+  button:disabled {{ opacity: .4; cursor: not-allowed; transform: none; }}
+
+  .steps {{
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+    margin-top: 1.8rem;
+  }}
+
+  .step {{
+    display: flex;
+    align-items: flex-start;
+    gap: .75rem;
+    font-size: .82rem;
+    color: var(--muted);
+    line-height: 1.5;
+  }}
+
+  .step-num {{
+    flex-shrink: 0;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: .7rem;
+    font-weight: 700;
+    color: var(--accent2);
+    margin-top: 1px;
+  }}
+
+  #status-box {{
+    display: none;
+    margin-top: 1.5rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+  }}
+
+  #status-box.visible {{ display: block; }}
+
+  .status-line {{
+    font-family: var(--mono);
+    font-size: .75rem;
+    line-height: 1.7;
+    word-break: break-all;
+  }}
+
+  .status-line.ok   {{ color: var(--success); }}
+  .status-line.err  {{ color: var(--error); }}
+  .status-line.info {{ color: var(--muted); }}
+  .status-line.link {{ color: var(--accent2); cursor: pointer; text-decoration: underline; }}
+
+  .spinner {{
+    display: inline-block;
+    width: 12px; height: 12px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent2);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    vertical-align: middle;
+    margin-right: .4rem;
+  }}
+  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+
+  .divider {{
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 1.8rem 0 1.4rem;
+  }}
+
+  .pixel-preview {{
+    display: none;
+    flex-direction: column;
+    gap: .4rem;
+    margin-top: 1rem;
+  }}
+  .pixel-preview.visible {{ display: flex; }}
+  .pixel-preview img {{
+    image-rendering: pixelated;
+    width: 100%;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+  }}
+  .pixel-preview small {{
+    color: var(--muted);
+    font-size: .73rem;
+    font-family: var(--mono);
+  }}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <div class="logo-icon">🧊</div>
+    <div class="logo-text">Tripo3D <span>→ imgbb</span> Encoder</div>
+  </div>
+
+  <h1>Source-to-pixel uploader</h1>
+  <p class="sub">
+    Paste a Tripo3D model URL. The script will visit the page, detect the
+    signed <code>.glb</code> download link, encode this tool's source code
+    as a pixel-art PNG, then upload it to imgbb.
+  </p>
+
+  <label for="url-input">Tripo3D model URL</label>
+  <div class="input-row">
+    <input
+      type="text"
+      id="url-input"
+      placeholder="https://studio.tripo3d.ai/3d-model/…"
+      value="{DEFAULT_TRIPO_URL}"
+    >
+    <button id="go-btn" onclick="startFlow()">Run</button>
+  </div>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div>Open the Tripo3D page and intercept the signed <code>.glb</code> network request</div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div>Encode this script's source bytes as RGB pixels — one byte per channel — into a PNG</div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div>Upload the PNG to imgbb and return the shareable URL</div>
+    </div>
+  </div>
+
+  <div id="status-box">
+    <div id="status-lines"></div>
+    <div class="pixel-preview" id="pixel-preview">
+      <img id="pixel-img" src="" alt="pixel-encoded source">
+      <small id="pixel-meta"></small>
+    </div>
+  </div>
+</div>
+
+<script>
+function log(msg, cls) {{
+  cls = cls || 'info';
+  var box = document.getElementById('status-box');
+  box.classList.add('visible');
+  var line = document.createElement('div');
+  line.className = 'status-line ' + cls;
+  line.innerHTML = msg;
+  document.getElementById('status-lines').appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}}
+
+function clearLog() {{
+  document.getElementById('status-lines').innerHTML = '';
+  var pp = document.getElementById('pixel-preview');
+  pp.classList.remove('visible');
+}}
+
+function startFlow() {{
+  var url = document.getElementById('url-input').value.trim();
+  if (!url) {{ alert('Please enter a Tripo3D URL.'); return; }}
+
+  document.getElementById('go-btn').disabled = true;
+  clearLog();
+  log('<span class="spinner"></span> Navigating to Tripo3D page…');
+
+  // Tell Python to navigate and run the full pipeline
+  window.pywebview.api.start_pipeline(url)
+    .then(function(result) {{
+      if (result && result.error) {{
+        log('Error: ' + result.error, 'err');
+      }}
+    }})
+    .catch(function(e) {{
+      log('JS error: ' + e, 'err');
+    }});
+}}
+
+// Called from Python to push status messages into the UI
+function pushStatus(msg, cls) {{
+  log(msg, cls || 'info');
+  if (cls === 'ok' || cls === 'err') {{
+    document.getElementById('go-btn').disabled = false;
+  }}
+}}
+
+// Called from Python to show the pixel preview
+function showPixelPreview(dataUrl, meta) {{
+  var pp = document.getElementById('pixel-preview');
+  pp.classList.add('visible');
+  document.getElementById('pixel-img').src = dataUrl;
+  document.getElementById('pixel-meta').textContent = meta;
+}}
+</script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# Python API exposed to the webview
+# ---------------------------------------------------------------------------
+
+class Api:
+    """Methods callable from JavaScript via window.pywebview.api.*"""
+
+    def __init__(self):
+        self._window = None   # set after window creation
+
+    # -- called by JS ---------------------------------------------------------
+
+    def start_pipeline(self, tripo_url: str) -> dict:
+        """
+        Step 1: Navigate to the Tripo3D model page.
+        The rest of the pipeline continues in on_model_found().
+        """
+        self._status("Navigating to Tripo3D…", "info")
+        if self._window:
+            self._window.load_url(tripo_url)
+        return {}
+
+    def on_model_found(self, model_url: str):
+        """
+        Called from the injected JS when a .glb URL is intercepted.
+        Runs the encode + upload pipeline in a background thread.
+        """
+        self._status(f"✓ Model URL detected: <br><code>{model_url[:80]}…</code>", "ok")
+        threading.Thread(
+            target=self._encode_and_upload,
+            args=(model_url,),
+            daemon=True,
+        ).start()
+
+    # -- internal -------------------------------------------------------------
+
+    def _status(self, msg: str, cls: str = "info"):
+        """Push a status message into the landing page UI."""
+        if self._window is None:
+            print(f"[{cls}] {msg}")
+            return
+        safe = msg.replace("\\", "\\\\").replace("`", "\\`").replace("'", "\\'")
+        # We're on the landing page when this is first called; after
+        # navigation we go to Tripo3D, so we need to navigate back first.
+        # Instead, we store messages and re-inject on return.
+        # Simple approach: use evaluate_js on whatever page is current.
+        try:
+            self._window.evaluate_js(
+                f"if(typeof pushStatus==='function')pushStatus(`{safe}`,'{cls}');"
+            )
+        except Exception:
+            print(f"[{cls}] {msg}")
+
+    def _encode_and_upload(self, model_url: str):
+        """Background worker: encode source → PNG → imgbb."""
+        # Navigate back to the landing page so we can show status
+        self._status("Encoding source code as pixel image…", "info")
+
+        # Read this script's own source
+        try:
+            with open(__file__, "rb") as fh:
+                source_bytes = fh.read()
+        except Exception as e:
+            self._status(f"Could not read source file: {e}", "err")
+            return
+
+        src_len = len(source_bytes)
+        self._status(f"Source size: {src_len:,} bytes", "info")
+
+        # Encode to PNG
+        try:
+            png_bytes = bytes_to_png(source_bytes)
+        except Exception as e:
+            self._status(f"Encoding failed: {e}", "err")
+            return
+
+        n_pixels = math.ceil(math.sqrt(math.ceil((src_len + 4) / 3))) ** 2
+        width    = math.ceil(math.sqrt(math.ceil((src_len + 4) / 3)))
+        height   = math.ceil(math.ceil((src_len + 4) / 3) / width)
+        meta     = f"{width}×{height} px  |  {len(png_bytes):,} bytes PNG"
+
+        self._status(f"PNG created: {meta}", "info")
+
+        # Show preview in UI (data URL)
+        try:
+            b64_preview = base64.b64encode(png_bytes).decode()
+            data_url    = f"data:image/png;base64,{b64_preview}"
+            safe_meta   = meta.replace("'", "\\'")
+            if self._window:
+                self._window.evaluate_js(
+                    f"if(typeof showPixelPreview==='function')"
+                    f"showPixelPreview('{data_url}','{safe_meta}');"
+                )
+        except Exception:
+            pass  # preview is optional
+
+        # Save locally too
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        local_path = os.path.join(DOWNLOAD_DIR, "networklisten.png")
+        try:
+            with open(local_path, "wb") as fh:
+                fh.write(png_bytes)
+            self._status(f"Saved locally → {local_path}", "info")
+        except Exception as e:
+            self._status(f"Local save failed: {e}", "err")
+
+        # Upload to imgbb
+        self._status("Uploading to imgbb…", "info")
+        try:
+            result = upload_to_imgbb(png_bytes, "networklisten.png")
+        except Exception as e:
+            self._status(f"imgbb upload failed: {e}", "err")
+            return
+
+        if result.get("success"):
+            data     = result["data"]
+            img_url  = data.get("url", "")
+            display  = data.get("display_url", "")
+            delete   = data.get("delete_url", "")
+            self._status("✓ Upload successful!", "ok")
+            self._status(
+                f'Image URL: <a class="link" onclick="navigator.clipboard.writeText(\'{img_url}\')">'
+                f"{img_url}</a>",
+                "link",
+            )
+            if display:
+                self._status(f"Display URL: {display}", "info")
+            if delete:
+                self._status(f"Delete URL: {delete}", "info")
+            self._status(
+                f"Encoded model URL inside image: {model_url[:60]}…", "info"
+            )
+        else:
+            err = result.get("error", {}).get("message", str(result))
+            self._status(f"imgbb error: {err}", "err")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    global window
+    if webview is None:
+        print("pywebview is not installed.  Run:  pip install pywebview Pillow requests")
+        return
 
-    api = Api()
-
+    api    = Api()
     window = webview.create_window(
-        title="Tripo3D — 3D Model Viewer (auto-detect)",
-        url=DEFAULT_URL,
-        js_api=api,
-        width=1280,
-        height=800,
+        title   = "Tripo3D → imgbb Encoder",
+        html    = LANDING_HTML,
+        js_api  = api,
+        width   = 800,
+        height  = 680,
         resizable=True,
     )
+    api._window = window
 
-    # Hook page-load event
-    window.events.loaded += lambda: on_loaded(window)
+    def on_loaded():
+        url = window.get_current_url() or ""
+        if "tripo3d.ai" in url:
+            window.evaluate_js(INJECTOR_JS)
+            print(f"[scanner] Injector active on: {url}")
+            # Navigate back to landing so the user sees the status messages
+            # We use a short delay to let the page settle first
+            def navigate_home():
+                import time; time.sleep(3)
+                window.load_html(LANDING_HTML)
+            threading.Thread(target=navigate_home, daemon=True).start()
 
-    print("[Tripo3D Viewer] Starting …")
-    print(f"[Tripo3D Viewer] Watching for: .glb?Key-Pair-Id= (primary), "
-          f"{', '.join(MODEL_EXTENSIONS)} (fallback)")
+    window.events.loaded += on_loaded
+
+    print("[Tripo3D Encoder] Starting …")
     webview.start(debug=False)
 
 
