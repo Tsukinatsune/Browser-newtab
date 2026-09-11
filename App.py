@@ -7,8 +7,7 @@ import urllib.parse
 
 # Default URL to load first
 DEFAULT_URL = (
-    "https://studio.tripo3d.ai/3d-model/"
-    "anime-girl-character-with-flowing-peach-hair-pink-skirt-white-top-a-26b155ec-9124-46c1-acb8-139b24d78c28"
+    "https://studio.tripo3d.ai/3d-model/anime-girl-with-dark-hair-in-a-black-and-pink-school-uniform-wielding-bc97148a-4c5b-4196-a3ed-57cea8530be6"
 )
 
 # 3D model file extensions to detect (used as a fallback pattern)
