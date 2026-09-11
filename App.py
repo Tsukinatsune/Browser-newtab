@@ -175,7 +175,7 @@ def main():
     print("[Tripo3D Viewer] Starting …")
     print(f"[Tripo3D Viewer] Watching for: .glb?Key-Pair-Id= (primary), "
           f"{', '.join(MODEL_EXTENSIONS)} (fallback)")
-    webview.start(debug=False)
+    webview.start(debug=True)
 
 
 if __name__ == "__main__":
