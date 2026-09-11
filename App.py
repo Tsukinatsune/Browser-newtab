@@ -9,7 +9,7 @@ DEFAULT_URL = (
     "wielding-bc97148a-4c5b-4196-a3ed-57cea8530be6"
 )
 
-# 3D model file extensions to detect
+# 3D model file extensions to detect (used as a fallback pattern)
 MODEL_EXTENSIONS = [
     ".glb", ".gltf",
     ".fbx",
@@ -28,7 +28,20 @@ MODEL_EXTENSIONS = [
     ".step", ".stp",
 ]
 
-# Regex pattern that matches any URL containing a model extension
+# --- Primary pattern -------------------------------------------------------
+# Tripo3D's signed download links always look like:
+#   ...meshopt.glb?Key-Pair-Id=...&Policy=...&Signature=...
+# This is a static, predictable structure, so we match on it directly
+# instead of relying on a generic extension scan.
+TRIPO_GLB_PATTERN = re.compile(
+    r"https?://[^\s\"'<>]+\.glb\?Key-Pair-Id=[^\s\"'<>]+",
+    re.IGNORECASE,
+)
+
+# --- Fallback pattern --------------------------------------------------
+# Broader match against any known 3D model extension, used only if the
+# primary Tripo3D-specific pattern doesn't find anything (e.g. Tripo3D
+# changes their CDN param order, or the page serves a different format).
 _ext_pattern = "|".join(re.escape(e) for e in MODEL_EXTENSIONS)
 MODEL_URL_PATTERN = re.compile(
     rf"https?://[^\s\"'<>]+(?:{_ext_pattern})(?:[?#][^\s\"'<>]*)?",
@@ -44,8 +57,14 @@ class Api:
     def check_for_model_url(self, page_html: str) -> str | None:
         """
         Called from JS with the full page HTML / visible text.
-        Returns the first 3D-model URL found, or None.
+        Tries the static Tripo3D .glb?Key-Pair-Id= pattern first, then
+        falls back to the generic extension pattern.
+        Returns the first matching URL, or None.
         """
+        match = TRIPO_GLB_PATTERN.search(page_html)
+        if match:
+            return match.group(0)
+
         match = MODEL_URL_PATTERN.search(page_html)
         return match.group(0) if match else None
 
@@ -78,20 +97,27 @@ INJECTOR_JS = """
 
         var combined = sources.join(' ');
 
-        // Extensions to look for
-        var exts = [
-            '\\.glb', '\\.gltf', '\\.fbx', '\\.obj', '\\.stl',
-            '\\.ply', '\\.dae', '\\.3ds', '\\.blend',
-            '\\.usdz', '\\.usd', '\\.abc', '\\.x3d',
-            '\\.wrl', '\\.vrml', '\\.off', '\\.iges',
-            '\\.igs', '\\.step', '\\.stp'
-        ];
-        var pattern = new RegExp(
-            'https?://[^\\s\\"\'<>]+(?:' + exts.join('|') + ')(?:[?#][^\\s\\"\'<>]*)?',
-            'i'
-        );
+        // Primary: Tripo3D's static signed .glb link structure
+        var primaryPattern = /https?:\\/\\/[^\\s"'<>]+\\.glb\\?Key-Pair-Id=[^\\s"'<>]+/i;
 
-        var match = combined.match(pattern);
+        var match = combined.match(primaryPattern);
+
+        if (!match) {
+            // Fallback: generic extension scan
+            var exts = [
+                '\\.glb', '\\.gltf', '\\.fbx', '\\.obj', '\\.stl',
+                '\\.ply', '\\.dae', '\\.3ds', '\\.blend',
+                '\\.usdz', '\\.usd', '\\.abc', '\\.x3d',
+                '\\.wrl', '\\.vrml', '\\.off', '\\.iges',
+                '\\.igs', '\\.step', '\\.stp'
+            ];
+            var fallbackPattern = new RegExp(
+                'https?://[^\\s\\"\\'<>]+(?:' + exts.join('|') + ')(?:[?#][^\\s\\"\\'<>]*)?',
+                'i'
+            );
+            match = combined.match(fallbackPattern);
+        }
+
         if (match) {
             _redirected = true;
             console.log('[Tripo3D Detector] Found model URL:', match[0]);
@@ -147,7 +173,8 @@ def main():
     window.events.loaded += lambda: on_loaded(window)
 
     print("[Tripo3D Viewer] Starting …")
-    print(f"[Tripo3D Viewer] Watching for extensions: {', '.join(MODEL_EXTENSIONS)}")
+    print(f"[Tripo3D Viewer] Watching for: .glb?Key-Pair-Id= (primary), "
+          f"{', '.join(MODEL_EXTENSIONS)} (fallback)")
     webview.start(debug=False)
 
 
